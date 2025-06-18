@@ -1,4 +1,4 @@
-Lang = "English"
+Lang = "Espanol"
 
 Config = {
 	-- ======================= DEVELOPMENT ============================== --
