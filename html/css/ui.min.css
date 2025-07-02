@@ -672,7 +672,7 @@ input#secondarysearch:-ms-input-placeholder {
     background-image: url(../img/count.png);
     background-repeat: no-repeat;
     background-position: center;
-    background-size: 2.8vw, 1vh;
+    background-size: 2.2vw, 0.8vh;
     line-height: 3vh;
     pointer-events: none;
 }
