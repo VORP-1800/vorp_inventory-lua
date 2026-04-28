@@ -2,7 +2,6 @@ local isProcessingPay     = false
 local timerUse            = 0
 local candrop             = true
 local cangive             = true
-local CanOpen             = true
 local InventoryIsDisabled = false
 local T                   = TranslationInv.Langs[Lang]
 local Core                = exports.vorp_core:GetCore()
@@ -69,13 +68,11 @@ function NUIService.ReloadInventory(inventory, packed)
 	SynPending = false
 end
 
+local inCustomInventory = false
 function NUIService.OpenCustomInventory(name, id, capacity, weight)
-	CanOpen = Core.Callback.TriggerAwait("vorp_inventory:Server:CanOpenCustom", id)
-	if not CanOpen then return end
-
+	inCustomInventory = true
 	ApplyPosfx()
 	DisplayRadar(false)
-	CanOpen = false
 	SetNuiFocus(true, true)
 	SendNUIMessage({
 		action = "display",
@@ -97,10 +94,6 @@ function NUIService.NUITakeFromCustom(obj)
 end
 
 function NUIService.OpenPlayerInventory(name, id, type)
-	CanOpen = Core.Callback.TriggerAwait("vorp_inventory:Server:CanOpenCustom", id)
-	if not CanOpen then return end
-
-	CanOpen = false
 	ApplyPosfx()
 	DisplayRadar(false)
 	SetNuiFocus(true, true)
@@ -126,6 +119,7 @@ function NUIService.TransferLimitExceeded(maxValue)
 	Core.NotifyRightTip(message, 4000)
 end
 
+-- was closed by the client
 function NUIService.CloseInv()
 	if Config.UseFilter then
 		AnimpostfxStop(Config.Filter)
@@ -145,15 +139,16 @@ function NUIService.CloseInv()
 		end
 	end
 
-	if not CanOpen then
-		TriggerServerEvent("vorp_inventory:Server:UnlockCustomInv")
-	end
 	DisplayRadar(true)
 	SetNuiFocus(false, false)
 	SendNUIMessage({ action = "hide" })
 	InInventory = false
 	TriggerEvent("vorp_stables:setClosedInv", false)
 	TriggerEvent("syn:closeinv")
+	if inCustomInventory then
+		inCustomInventory = false
+		TriggerServerEvent("vorp_inventory:Server:CloseCustomInventory")
+	end
 end
 
 function NUIService.setProcessingPayFalse()
@@ -403,6 +398,8 @@ local function useWeapon(data)
 		local key = string.format("GetEquippedWeaponData_%d", weapName)
 		LocalPlayer.state:set(key, info, true)
 	end
+	TriggerServerEvent("vorpinventory:setUsedWeapon", weaponId, UserWeapons[weaponId]:getUsed(), UserWeapons[weaponId]:getUsed2())
+
 	NUIService.LoadInv()
 end
 
@@ -411,7 +408,7 @@ exports("useWeapon", useWeapon)
 local function useItem(data)
 	if timerUse <= 0 then
 		TriggerServerEvent("vorp_inventory:useItem", data)
-		timerUse = 2000
+		timerUse = Config.SpamDelay
 	else
 		Core.NotifyRightTip(T.slow, 5000)
 	end
@@ -429,7 +426,9 @@ exports("useItem", useItem) -- not tested yet
 
 
 function NUIService.NUISound()
-	PlaySoundFrontend("BACK", "RDRO_Character_Creator_Sounds", true, 0)
+	if Config.SFX.ItemHover then
+		PlaySoundFrontend("BACK", "RDRO_Character_Creator_Sounds", true, 0)
+	end
 end
 
 function NUIService.NUIFocusOff()
@@ -437,9 +436,12 @@ function NUIService.NUIFocusOff()
 		AnimpostfxStop(Config.Filter)
 	end
 	DisplayRadar(true)
-	PlaySoundFrontend("SELECT", "RDRO_Character_Creator_Sounds", true, 0)
+	if Config.SFX.CloseInventory then
+		PlaySoundFrontend("SELECT", "RDRO_Character_Creator_Sounds", true, 0)
+	end
 	NUIService.CloseInv()
 end
+
 local function loadItems()
 	local items = {}
 	if not StoreSynMenu then
@@ -454,7 +456,7 @@ local function loadItems()
 			end
 		end
 
-		
+
 		local buyitems = GenSynInfo.buyitems
 		if buyitems and next(buyitems) then
 			for _, item in pairs(UserInventory) do
@@ -467,7 +469,6 @@ local function loadItems()
 							else
 								item.metadata.orgdescription = ""
 							end
-						else
 						end
 						item.metadata.description = T.cansell .. "<span style=color:Green;>" .. v.price .. "</span>"
 					end
@@ -504,7 +505,6 @@ local function loadWeapons()
 		weapon.serial_number = currentWeapon:getSerialNumber()
 		weapon.custom_label = currentWeapon:getCustomLabel()
 		weapon.custom_desc = currentWeapon:getCustomDesc()
-		weapon.custom_label = currentWeapon:getCustomLabel()
 		weapon.weight = currentWeapon:getWeight()
 		table.insert(weapons, weapon)
 	end
@@ -538,12 +538,12 @@ local function loadItemsAndWeapons()
 end
 
 function NUIService.LoadInv()
-	local payload = {}
+	local payload <const> = {}
 
 	Core.Callback.TriggerAsync("vorpinventory:get_slots", function(result)
 		if not result then return end
-		
-		SendNUIMessage({ action = "changecheck", check = string.format("%.1f", result.totalInvWeight), info = string.format("%.1f", result.slots) })
+
+		SendNUIMessage({ action = "changecheck", check = string.format("%.1f", (result.totalInvWeight or 0)), info = string.format("%.1f", (result.slots or 0)) })
 		SendNUIMessage({
 			action = "updateStatusHud",
 			show   = not IsRadarHidden(),
@@ -564,7 +564,9 @@ end
 function NUIService.OpenInv()
 	ApplyPosfx()
 	DisplayRadar(false)
-	PlaySoundFrontend("SELECT", "RDRO_Character_Creator_Sounds", true, 0)
+	if Config.SFX.OpenInventory then
+		PlaySoundFrontend("SELECT", "RDRO_Character_Creator_Sounds", true, 0)
+	end
 	SetNuiFocus(true, true)
 	SendNUIMessage({
 		action = "display",
@@ -615,6 +617,7 @@ function NUIService.initiateData()
 			use = T.use,
 			give = T.give,
 			drop = T.drop,
+			copyserial = T.copyserial,
 			labels = T.labels
 		},
 		config = {
@@ -630,7 +633,8 @@ function NUIService.initiateData()
 end
 
 local blockInventory = false
--- Main loo
+local isWalking = false
+
 CreateThread(function()
 	local controlVar = false -- best to use variable than to check statebag every frame
 
@@ -646,6 +650,25 @@ CreateThread(function()
 				local hogtied = IsPedHogtied(player) == 1
 				local cuffed = IsPedCuffed(player)
 				if not hogtied and not cuffed and not InventoryIsDisabled then
+					if Config.AllowWalkingWhileInventoryOpen then
+						if IsControlPressed(1, `INPUT_MOVE_UP_ONLY`) == 1 and not isWalking then
+							isWalking = true
+							local _isWalking = IsPedWalking(player)
+							local isRunning = IsPedRunning(player)
+							local isSprinting = IsPedSprinting(player)
+							local speed = _isWalking and 1.0 or isRunning and 2.0 or isSprinting and 3.0 or 0.0
+							local heading = GetEntityHeading(player)
+							CreateThread(function()
+								repeat Wait(0) until IsNuiFocused()
+								SimulatePlayerInputGait(PlayerId(), speed, -1, heading, false, false)
+								repeat Wait(0) until not IsNuiFocused()
+								isWalking = false
+								if GetMount(player) > 0 or IsPedInAnyVehicle(player, false) then
+									ResetPlayerInputGait(PlayerId()) -- needs to reset on vehcicles or mount or only works for the first time for walking no need pressing the W key will reset it it seems
+								end
+							end)
+						end
+					end
 					NUIService.OpenInv()
 				end
 			end
@@ -721,9 +744,9 @@ function NUIService.ContextMenu(data)
 		NUIService.CloseInv()
 	end
 
-	if data.event.client then
-		TriggerEvent(data.event.client, data.arguments)
-	elseif data.event.server then
-		TriggerServerEvent(data.event.server, data.arguments)
+	if data.event?.client then
+		TriggerEvent(data.event.client, data.event?.arguments, data.itemid)
+	elseif data.event?.server then
+		TriggerServerEvent("vorpinventory:validateContextMenuEvent", data)
 	end
 end

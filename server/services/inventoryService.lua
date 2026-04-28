@@ -73,20 +73,22 @@ function InventoryService.UseItem(data)
 	if arguments.item.isDegradable then
 		local isExpired = item:isItemExpired()
 		if isExpired then
-			local text = "Item is expired and can't be used"
-			if Config.DeleteItemOnUseWhenExpired then
-				InventoryAPI.subItemID(_source, item:getId())
-				text = "Item is expired and can't be used, item was removed from your inventory"
+			local canUseExpired = arguments.item.metadata?.useExpired or ServerItems[itemName]?.useExpired
+			if not canUseExpired then
+				local text = "Item is expired and can't be used"
+				if Config.DeleteItemOnUseWhenExpired then
+					InventoryAPI.subItemID(_source, item:getId())
+					text = "Item is expired and can't be used, item was removed from your inventory"
+				end
+				Core.NotifyRightTip(_source, text, 3000)
+				return
 			end
-			Core.NotifyRightTip(_source, text, 3000)
-			return
 		end
 	end
 
 	TriggerEvent("vorp_inventory:Server:OnItemUse", arguments)
 
 	local success <const>, result <const> = pcall(UsableItemsFunctions[itemName], arguments)
-
 	if not success then
 		return print("Function call failed with error:", result, "a usable item :", itemName, " have an error in the callback function")
 	end
@@ -242,10 +244,15 @@ function InventoryService.setWeaponBullets(weaponId, type, amount)
 	end
 end
 
-function InventoryService.usedWeapon(id, _used, _used2)
+function InventoryService.usedWeapon(id, used, used2)
 	local query <const> = 'UPDATE loadout SET used = @used, used2 = @used2 WHERE id = @id'
-	local params <const> = { used = _used and 1 or 0, used2 = _used2 and 1 or 0, id = id }
-	DBService.updateAsync(query, params, function(r) end)
+	local params <const> = { used = used and 1 or 0, used2 = used2 and 1 or 0, id = id }
+	DBService.updateAsync(query, params)
+	local userWeapons <const> = UsersWeapons.default
+	if userWeapons[id] then
+		userWeapons[id]:setUsed(used)
+		userWeapons[id]:setUsed2(used2)
+	end
 end
 
 function InventoryService.subItem(source, invId, itemId, amount)
@@ -273,7 +280,7 @@ function InventoryService.subItem(source, invId, itemId, amount)
 
 	if item:getCount() == 0 then
 		if invId == "default" then
-			local data = { name = item:getName(), count = amount }
+			local data = { name = item:getName(), count = amount, metadata = item:getMetadata() }
 			TriggerEvent("vorp_inventory:Server:OnItemRemoved", data, _source)
 		end
 		userInventory[itemId] = nil
@@ -297,7 +304,9 @@ end
 function InventoryService.addItem(source, invId, name, amount, metadata, data, cb)
 	local _source <const> = source
 	local user <const> = Core.getUser(_source)
-	if not user then return cb(nil) end
+	if not user then
+		return cb(nil)
+	end
 
 	local sourceCharacter <const> = user.getUsedCharacter
 	local identifier <const> = sourceCharacter.identifier
@@ -310,12 +319,15 @@ function InventoryService.addItem(source, invId, name, amount, metadata, data, c
 
 	metadata = SharedUtils.MergeTables(svItem.metadata, metadata or {})
 	local userInventory <const> = CustomInventoryInfos[invId].shared and UsersInventories[invId] or UsersInventories[invId][identifier]
-	if not userInventory then return cb(nil) end
+	if not userInventory then
+		return cb(nil)
+	end
 
 
 	local function createItem()
 		local degrade <const> = svItem:getMaxDegradation()
-		local isExpired = degrade ~= 0 and os.time() or nil
+		local isExpired <const> = degrade ~= 0 and os.time() or nil
+		local promise = promise.new()
 		DBService.CreateItem(charIdentifier, svItem:getId(), amount, metadata, name, isExpired, function(craftedItem)
 			local item <const> = Item:New({
 				id = craftedItem.id,
@@ -340,7 +352,7 @@ function InventoryService.addItem(source, invId, name, amount, metadata, data, c
 						if data.degradation > 0 then
 							if data.isPickup then
 								if not item:isItemExpired(data.degradation, degrade) then
-									local elapsedTime = os.time() - data.degradation
+									local elapsedTime <const> = os.time() - data.degradation
 									item.degradation = os.time() - elapsedTime
 									item.percentage = item:getPercentage(degrade, item.degradation)
 								else
@@ -351,16 +363,22 @@ function InventoryService.addItem(source, invId, name, amount, metadata, data, c
 								item.degradation = os.time() - item:getElapsedTime(degrade, data.percentage)
 								item.percentage = item:getPercentage(degrade, item.degradation)
 							end
-							DBService.queryAwait('UPDATE character_inventories SET degradation = @degradation, percentage = @percentage WHERE item_crafted_id = @id', { degradation = item.degradation, percentage = item.percentage, id = craftedItem.id })
+							DBService.queryAwait('UPDATE character_inventories SET degradation = @degradation, percentage = @percentage WHERE item_crafted_id = @id',
+								{ degradation = item.degradation, percentage = item.percentage, id = craftedItem.id }
+							)
 						else
 							item.degradation = 0
 							item.percentage = 0
-							DBService.queryAwait('UPDATE character_inventories SET degradation = @degradation, percentage = @percentage WHERE item_crafted_id = @id', { degradation = 0, percentage = 0, id = craftedItem.id })
+							DBService.queryAwait('UPDATE character_inventories SET degradation = @degradation, percentage = @percentage WHERE item_crafted_id = @id',
+								{ degradation = 0, percentage = 0, id = craftedItem.id }
+							)
 						end
 					else
 						item.degradation = os.time()
 						item.percentage = 100
-						DBService.queryAwait('UPDATE character_inventories SET degradation = @degradation, percentage = @percentage WHERE item_crafted_id = @id', { degradation = os.time(), percentage = 100, id = craftedItem.id })
+						DBService.queryAwait('UPDATE character_inventories SET degradation = @degradation, percentage = @percentage WHERE item_crafted_id = @id',
+							{ degradation = os.time(), percentage = 100, id = craftedItem.id }
+						)
 					end
 				end
 			else
@@ -373,41 +391,60 @@ function InventoryService.addItem(source, invId, name, amount, metadata, data, c
 						item.degradation = os.time()
 					end
 					-- custom invs need to be updated everytime
-					DBService.queryAwait('UPDATE character_inventories SET percentage = @percentage, degradation = @degradation WHERE item_crafted_id = @id', { percentage = item.percentage, degradation = item.degradation, id = craftedItem.id })
+					DBService.queryAwait('UPDATE character_inventories SET percentage = @percentage, degradation = @degradation WHERE item_crafted_id = @id',
+						{ percentage = item.percentage, degradation = item.degradation, id = craftedItem.id }
+					)
 				end
 			end
-
-
-			userInventory[craftedItem.id] = item
-			if invId == "default" then
-				local data = { name = item:getName(), count = amount, metadata = item:getMetadata() }
-				TriggerEvent("vorp_inventory:Server:OnItemCreated", data, _source)
-			end
-
-			return cb(item)
+			promise:resolve(item)
 		end, invId)
+
+		local item = Citizen.Await(promise)
+		if not item then
+			return cb(nil)
+		end
+
+		userInventory[item:getId()] = item
+		if invId == "default" then
+			TriggerEvent("vorp_inventory:Server:OnItemCreated", { name = item:getName(), count = amount, metadata = item:getMetadata() }, _source)
+		end
+		return cb(item)
 	end
 
-
+	-- item exists in inventory by name and metadata?
 	local item <const> = SvUtils.FindItemByNameAndMetadata(invId, identifier, name, metadata)
 	if item then
+		-- items exists with the same name and metadata
+		-- amount is greater than 0 for error
 		if amount > 0 then
+			-- if item is not a degradation item
 			if svItem:getMaxDegradation() == 0 then
-				item:addCount(amount, CustomInventoryInfos[invId].ignoreItemStackLimit)
+				local success = item:addCount(amount, CustomInventoryInfos[invId].ignoreItemStackLimit)
+				if not success then
+					return cb(false)
+				end
 				DBService.SetItemAmount(item:getOwner(), item:getId(), item:getCount())
 				return cb(item)
 			else
-				if item:getPercentage() == data.percentage and item:getDegradation() == data.degradation then
-					item:addCount(amount, CustomInventoryInfos[invId].ignoreItemStackLimit)
+				-- if item is degradation item
+				-- if is the correct item with the same values increase amount
+				if item:getPercentage() == data.percentage then
+					local success = item:addCount(amount, CustomInventoryInfos[invId].ignoreItemStackLimit)
+					if not success then
+						return cb(false)
+					end
 					DBService.SetItemAmount(item:getOwner(), item:getId(), item:getCount())
 					return cb(item)
 				end
 			end
+			-- create new item
 			return createItem()
 		end
+		-- error
+		print("DUPE DEBUG 4: addItem returning nil - amount <= 0 for item: " .. name)
 		return cb(nil)
 	end
-
+	-- item does not exist in inventory, or metadata is different create new item
 	return createItem()
 end
 
@@ -481,12 +518,12 @@ function InventoryService.onPickup(data)
 		end
 		local info <const> = { degradation = pickup.degradation, isPickup = true }
 		InventoryService.addItem(_source, "default", pickup.name, pickup.amount, pickup.metadata, info, function(item)
-			if item ~= nil and ItemPickUps[uid] then
+			if item and ItemPickUps[uid] then
 				ItemPickUps[uid] = nil
 
 				TriggerClientEvent("vorpInventory:sharePickupClient", -1, data, 2)
 				TriggerClientEvent("vorpInventory:receiveItem", _source, pickup.name, item:getId(), pickup.amount, pickup.metadata, item.degradation, item.percentage)
-				TriggerClientEvent("vorpInventory:playerAnim", _source, uid)
+				TriggerClientEvent("vorpInventory:playerPickUpAnim", _source, uid)
 
 				local charname <const>, _, steamname <const> = getSourceInfo(_source)
 				local title <const>                          = T.itempickup
@@ -537,12 +574,12 @@ function InventoryService.onPickup(data)
 					if serialNumber == nil then
 						serialNumber = "Serial Number not set"
 					end
-					local charname, scourceidentifier, steamname = getSourceInfo(_source)
+					local charname, _, steamname = getSourceInfo(_source)
 					local title = T.weppickup
 					local description = "**" .. T.WebHookLang.Weapontype .. ":** `" .. weaponName .. "`\n**" .. T.WebHookLang.charname .. ":** `" .. charname .. "`\n**" .. T.WebHookLang.serialnumber .. "** `" .. serialNumber .. "`\n **" .. T.WebHookLang.Desc .. "** `" .. weaponCustomDesc .. "` \n **" .. T.WebHookLang.Steamname .. "** `" .. steamname .. "`"
 					local info = { source = _source, name = Logs.WebHook.webhookname, title = title, description = description, webhook = Logs.WebHook.webhook, color = Logs.WebHook.colorweppickupd }
 					TriggerClientEvent("vorpInventory:sharePickupClient", -1, dataweapon, 2)
-					TriggerClientEvent("vorpInventory:playerAnim", _source, uid)
+					TriggerClientEvent("vorpInventory:playerPickUpAnim", _source, uid)
 					InventoryService.addWeapon(_source, weaponId)
 					SvUtils.SendDiscordWebhook(info)
 				end
@@ -572,7 +609,7 @@ function InventoryService.onPickupMoney(data)
 		SvUtils.SendDiscordWebhook(info)
 
 		TriggerClientEvent("vorpInventory:shareMoneyPickupClient", -1, data.obj, nil, nil, nil, 2)
-		TriggerClientEvent("vorpInventory:playerAnim", _source, data.obj)
+		TriggerClientEvent("vorpInventory:playerPickUpAnim", _source, data.obj)
 		local character = Core.getUser(_source).getUsedCharacter
 		character.addCurrency(0, data.amount)
 		MoneyPickUps[data.uuid] = nil
@@ -591,7 +628,7 @@ function InventoryService.onPickupGold(data)
 
 		local goldAmount = data.amount
 		TriggerClientEvent("vorpInventory:shareGoldPickupClient", -1, data.obj, goldAmount, data.coords, data.uuid, 2)
-		TriggerClientEvent("vorpInventory:playerAnim", _source, data.obj)
+		TriggerClientEvent("vorpInventory:playerPickUpAnim", _source, data.obj)
 
 		local character = Core.getUser(_source).getUsedCharacter
 		local charname, _, steamname = getSourceInfo(_source)
@@ -959,6 +996,7 @@ function InventoryService.GiveItem(itemId, amount, target)
 
 	local item = sourceInventory[itemId]
 	local itemName = item:getName()
+	local itemMetadata = item:getMetadata()
 	local svItem = ServerItems[itemName]
 	if not svItem or not item then
 		return
@@ -978,7 +1016,7 @@ function InventoryService.GiveItem(itemId, amount, target)
 	local function updateClient(addedItem)
 		TriggerClientEvent("vorpInventory:receiveItem", _target, itemName, addedItem:getId(), amount, item:getMetadata(), item:getDegradation(), item:getPercentage())
 		TriggerClientEvent("vorpInventory:removeItem", _source, itemName, item:getId(), amount)
-		local data = { name = itemName, count = amount }
+		local data = { name = itemName, count = amount, metadata = itemMetadata }
 		TriggerEvent("vorp_inventory:Server:OnItemRemoved", data, _source)
 		if item:getCount() - amount <= 0 then
 			DBService.DeleteItem(charid, item:getId())
@@ -1011,7 +1049,7 @@ function InventoryService.GiveItem(itemId, amount, target)
 				limit = svItem:getLimit(),
 				label = svItem:getLabel(),
 				name = itemName,
-				type = "item_inventory",
+				type = "item_standard",
 				metadata = item:getMetadata(),
 				canUse = svItem:getCanUse(),
 				canRemove = svItem:getCanRemove(),
@@ -1061,7 +1099,8 @@ function InventoryService.getItemsTable()
 
 	if ServerItems then
 		local data = msgpack.pack(ServerItems)
-		TriggerClientEvent("vorpInventory:giveItemsTable", _source, data)
+		-- some people have thousands of items so use latent events.
+		TriggerLatentClientEvent("vorpInventory:giveItemsTable", _source, 500000, data)
 	end
 end
 
@@ -1204,8 +1243,8 @@ function InventoryService.serverGiveAmmo(ammotype, amount, target, maxcount)
 	local query = "UPDATE characters Set ammo=@ammo WHERE charidentifier=@charidentifier"
 	local params = { charidentifier = charidentifier, ammo = json.encode(AmmoData[_source].ammo) }
 	local params2 = { charidentifier = charidentifier2, ammo = json.encode(AmmoData[target].ammo) }
-	DBService.updateAsync(query, params, function(r) end)
-	DBService.updateAsync(query, params2, function(r) end)
+	DBService.updateAsync(query, params)
+	DBService.updateAsync(query, params2)
 
 	TriggerClientEvent("vorpinventory:updateuiammocount", _source, AmmoData[_source].ammo)
 	TriggerClientEvent("vorpinventory:updateuiammocount", target, AmmoData[target].ammo)
@@ -1302,7 +1341,7 @@ function InventoryService.reloadInventory(player, id, type, source)
 					id            = weaponId,
 					count         = 1,
 					name          = weapon.name,
-					label         = weapon.custom_label or weapon.name,
+					label         = weapon.name,
 					limit         = 1,
 					type          = "item_weapon",
 					desc          = weapon.desc,
@@ -1321,7 +1360,7 @@ function InventoryService.reloadInventory(player, id, type, source)
 					id            = weaponId,
 					count         = 1,
 					name          = weapon.name,
-					label         = weapon.custom_label or weapon.name,
+					label         = weapon.name,
 					limit         = 1,
 					type          = "item_weapon",
 					desc          = weapon.desc,
@@ -1563,7 +1602,25 @@ function InventoryService.MoveToCustom(obj)
 	local _source = source
 	local data = json.decode(obj)
 	local invId <const> = tostring(data.id)
-	if not CustomInventoryInfos[invId] then return end
+	if not CustomInventoryInfos[invId] then
+		return print("InventoryService.MoveToCustom: inventory not found with id: ", invId)
+	end
+
+	-- can only move items if this inventory is in use meaning was opened by the server
+	if not CustomInventoryInfos[invId]:isInUse() then
+		return print("inventory was not opened from the server user:", GetPlayerName(_source), "Tried to move items to:", invId, "possible Cheat!!")
+	end
+
+	-- this user did not open inventory through the server
+	if not INVENTORY_IN_USE[_source] then
+		return print("player:", GetPlayerName(_source), "did not open inventory through the server:", invId, "possible Cheat!!")
+	end
+
+	-- is the id the same as the one in use?
+	if INVENTORY_IN_USE[_source] ~= invId then
+		return print("player:", GetPlayerName(_source), "tried to move items to:", invId, "when the inventory allowed id for this user is:" .. INVENTORY_IN_USE[_source] .. " possible Cheat!!")
+	end
+
 
 	local item = data.item
 	local amount = tonumber(data.number)
@@ -1646,10 +1703,12 @@ function InventoryService.MoveToCustom(obj)
 				SvUtils.Trem(_source)
 				return print(T.cantAddItem)
 			end
-
+			local metadataLabel = item.metadata?.label or item.label
 			InventoryService.subItem(_source, "default", item.id, amount)
+			TriggerEvent("vorp_inventory:Server:OnItemMovedToCustomInventory", { id = item.id, name = item.name, amount = amount, metadata = item.metadata }, invId, _source)
 			TriggerClientEvent("vorpInventory:removeItem", _source, item.name, item.id, amount)
-			Core.NotifyRightTip(_source, T.movedToStorage .. " " .. amount .. " " .. item.label, 2000)
+			Core.NotifyRightTip(_source, T.movedToStorage .. " " .. amount .. " " .. metadataLabel, 2000)
+
 			InventoryService.reloadInventory(_source, invId)
 			InventoryService.DiscordLogs(invId, item.name, amount, sourceName, "Move")
 			SvUtils.Trem(_source)
@@ -1662,7 +1721,23 @@ function InventoryService.TakeFromCustom(obj)
 
 	local data = json.decode(obj)
 	local invId <const> = tostring(data.id)
-	if not CustomInventoryInfos[invId] then return end
+	if not CustomInventoryInfos[invId] then
+		return print("InventoryService.TakeFromCustom: inventory not found with id: ", invId)
+	end
+
+	-- can only take items if this user had opened the inventory through the server
+	if not CustomInventoryInfos[invId]:isInUse() then
+		return print("inventory was not opened from the server user:", GetPlayerName(_source), "Tried to take items from:", invId, "possible Cheat!!")
+	end
+	-- this user did not open inventory through the server
+	if not INVENTORY_IN_USE[_source] then
+		return print("player:", GetPlayerName(_source), "did not open inventory through the server:", invId, "possible Cheat!!")
+	end
+
+	-- is the id the same as the one in use?
+	if INVENTORY_IN_USE[_source] ~= invId then
+		return print("player:", GetPlayerName(_source), "tried to take items from:", invId, "when the inventory allowed id for this user is:" .. INVENTORY_IN_USE[_source] .. " possible Cheat!!")
+	end
 
 	local item = data.item
 	local amount = tonumber(data.number)
@@ -1692,6 +1767,18 @@ function InventoryService.TakeFromCustom(obj)
 		if not canCarryWeapon then
 			SvUtils.Trem(_source)
 			return Core.NotifyObjective(_source, T.fullInventory, 2000)
+		end
+
+		local userWeapons = UsersWeapons.default
+		local weapon = userWeapons[item.id]
+		if weapon then
+			return print(GetPlayerName(_source) .. " tried to take a weapon from:" .. invId .. ", but already has it on main inventory with the same ID:" .. item.id .. "Possible Cheat!!")
+		end
+
+		local _userWeapons = UsersWeapons[invId]
+		local _weapon = _userWeapons[item.id]
+		if not _weapon then
+			return print(GetPlayerName(_source) .. " tried to take a weapon from:" .. invId .. ", but ID doesnt exist Possible Cheat!!")
 		end
 
 		local query = "UPDATE loadout SET curr_inv = 'default', charidentifier = @charid, identifier = @identifier WHERE id = @weaponId"
@@ -1727,7 +1814,13 @@ function InventoryService.TakeFromCustom(obj)
 	else
 		if item.count and amount > item.count then
 			SvUtils.Trem(_source)
-			return print(T.itemExceedsLimit)
+			return print(GetPlayerName(_source) .. " tried to take an item from:" .. invId .. ", but the item count is less than the amount requested:" .. amount .. "Possible Cheat!!")
+		end
+
+		local _userInventory = UsersInventories.default
+		local _item = _userInventory[sourceIdentifier]
+		if _item and _item[item.id] then
+			return print(GetPlayerName(_source) .. " tried to take an item from:" .. invId .. ", but already has it on main inventory with the same ID:" .. item.id .. "Possible Cheat!!")
 		end
 
 		local canCarryItem = InventoryAPI.canCarryItem(_source, item.name, amount)
@@ -1735,6 +1828,7 @@ function InventoryService.TakeFromCustom(obj)
 			SvUtils.Trem(_source)
 			return Core.NotifyObjective(_source, T.cantCarryItemStack, 2000)
 		end
+
 		local info = { degradation = item.degradation, isPickup = false, percentage = item.percentage }
 		InventoryService.addItem(_source, "default", item.name, amount, item.metadata, info, function(itemAdded)
 			if not itemAdded then
@@ -1744,14 +1838,19 @@ function InventoryService.TakeFromCustom(obj)
 
 			local result = InventoryService.subItem(_source, invId, item.id, amount)
 			if not result then
+				print(GetPlayerName(_source) .. " tried to take an item from:" .. invId .. " tried to use nui dev tools to dupe items Possible Cheat!!")
+				InventoryService.subItem(_source, "default", itemAdded:getId(), itemAdded:getCount())
 				SvUtils.Trem(_source)
-				return Core.NotifyObjective(_source, T.cantRemoveItem, 2000)
+				return
 			end
 
+			TriggerEvent("vorp_inventory:Server:OnItemTakenFromCustomInventory", { id = itemAdded:getId(), name = item.name, amount = amount, metadata = itemAdded:getMetadata() }, invId, _source)
 			TriggerClientEvent("vorpInventory:receiveItem", _source, item.name, itemAdded:getId(), amount, itemAdded:getMetadata(), itemAdded:getDegradation(), itemAdded:getPercentage())
 			InventoryService.reloadInventory(_source, invId)
 			InventoryService.DiscordLogs(invId, item.name, amount, sourceName, "Take")
-			Core.NotifyRightTip(_source, T.takenFromStorage .. " " .. amount .. " " .. item.label, 2000)
+
+			local metadataLabel = item.metadata?.label or item.label
+			Core.NotifyRightTip(_source, T.takenFromStorage .. " " .. amount .. " " .. metadataLabel, 2000)
 			SvUtils.Trem(_source)
 		end)
 	end
@@ -1851,15 +1950,16 @@ function InventoryService.MoveToPlayer(obj)
 			return Core.NotifyObjective(_source, T.notEnoughItems, 2000)
 		end
 
-		InventoryAPI.addItem(target, item.name, amount, item.metadata, function(res)
-			if res then
-				InventoryAPI.subItem(_source, item.name, amount, item.metadata, function(result)
-					if result then
+		InventoryAPI.addItem(target, item.name, amount, item.metadata, function(result)
+			if result then
+				InventoryAPI.subItem(_source, item.name, amount, item.metadata, function(result2)
+					if result2 then
 						SetTimeout(400, function()
 							InventoryService.reloadInventory(target, "default", "player", _source)
 							InventoryService.DiscordLogs(invId, item.name, amount, sourceName, "Move")
-							Core.NotifyRightTip(_source, T.movedToPlayer .. amount .. " " .. item.label, 2000)
-							Core.NotifyRightTip(target, T.itemGivenToPlayer .. " " .. item.label, 2000)
+							local metadataLabel = item.metadata?.label or item.label
+							Core.NotifyRightTip(_source, T.movedToPlayer .. amount .. " " .. metadataLabel, 2000)
+							Core.NotifyRightTip(target, T.itemGivenToPlayer .. " " .. metadataLabel, 2000)
 							SvUtils.Trem(_source)
 						end)
 					else
@@ -1930,14 +2030,15 @@ function InventoryService.TakeFromPlayer(obj)
 			return Core.NotifyObjective(_source, T.notEnoughItems, 2000)
 		end
 
-		InventoryAPI.addItem(_source, item.name, amount, item.metadata, function(res)
-			if res then
-				InventoryAPI.subItem(target, item.name, amount, item.metadata, function(result)
-					if result then
+		InventoryAPI.addItem(_source, item.name, amount, item.metadata, function(result)
+			if result then
+				InventoryAPI.subItem(target, item.name, amount, item.metadata, function(result2)
+					if result2 then
 						InventoryService.reloadInventory(target, "default", "player", _source)
 						InventoryService.DiscordLogs(invId, item.name, amount, sourceName, "Take")
-						Core.NotifyRightTip(_source, T.takenFromPlayer .. " " .. amount .. " " .. item.label, 2000)
-						Core.NotifyRightTip(target, T.itemsTakenFromPlayer .. " " .. item.label, 2000)
+						local metadataLabel = item.metadata?.label or item.label
+						Core.NotifyRightTip(_source, T.takenFromPlayer .. " " .. amount .. " " .. metadataLabel, 2000)
+						Core.NotifyRightTip(target, T.itemsTakenFromPlayer .. " " .. metadataLabel, 2000)
 					end
 					SvUtils.Trem(_source)
 				end, true)
@@ -2017,13 +2118,13 @@ local function updateItemAmount(id, identifier, amount, itemcraftedid, metadata,
 end
 
 local function updateItemInCustomInventory(id, identifier, itemCraftedId, amount, metadata, value, item, charid, isExpired, name)
-	local existingItem = nil
-
 	local customInventory <const> = UsersInventories[id]
 	if not customInventory then
 		return print("shared inventory does not exist with id " .. id)
 	end
 
+
+	local existingItem = nil
 	if CustomInventoryInfos[id]:isShared() then
 		existingItem = UsersInventories[id][itemCraftedId]
 	else
@@ -2035,21 +2136,23 @@ local function updateItemInCustomInventory(id, identifier, itemCraftedId, amount
 	if existingItem then
 		updateItemAmount(id, identifier, value.amount, itemCraftedId, metadata, name)
 	else
-		-- If the item doesn't exist in memory, we need to add it because we dont have a loader on server start, we miss some data in the database, like is shared and identifiers
-		local result3 = DBService.queryAwait("SELECT metadata FROM items_crafted WHERE id = @id", { id = itemCraftedId })
-		if result3[1] then
-			local itemData = {
-				name = value.name,
-				amount = amount + value.amount,
-				metadata = json.decode(result3[1].metadata) or {}
-			}
-			updateItem({ id = itemCraftedId }, itemData, item, charid, isExpired, id, identifier)
+		local dbCheck = DBService.queryAwait("SELECT ci.amount, ic.metadata FROM character_inventories ci LEFT JOIN items_crafted ic ON ic.id = ci.item_crafted_id WHERE ci.item_crafted_id = @id AND ci.inventory_type = @invType", { id = itemCraftedId, invType = id })
+		if not dbCheck[1] then
+			return print("[ERROR] updateItemInCustomInventory called but item doesn't exist in DB")
 		end
+
+		-- load item into cache with current amount
+		local itemData = {
+			name = value.name,
+			amount = dbCheck[1].amount,
+			metadata = json.decode(dbCheck[1].metadata) or {}
+		}
+		updateItem({ id = itemCraftedId }, itemData, item, charid, isExpired, id, identifier)
+		updateItemAmount(id, identifier, value.amount, itemCraftedId, metadata, name)
 	end
 end
 
 function InventoryService.addItemsToCustomInventory(id, items, charid, identifier)
-	local newTable = {}
 	local result <const> = DBService.queryAwait("SELECT inventory_type FROM character_inventories WHERE inventory_type = @id", { id = id })
 
 	if not result[1] then
@@ -2076,7 +2179,7 @@ function InventoryService.addItemsToCustomInventory(id, items, charid, identifie
 					end, id)
 				else
 					local resulItems = {}
-					for k, v in ipairs(result1) do -- if there is more than one apple we need to check which ones have metadata
+					for _, v in ipairs(result1) do -- if there is more than one apple we need to check which ones have metadata
 						local result2 = DBService.queryAwait("SELECT metadata FROM items_crafted WHERE id =@id", { id = v.item_crafted_id })
 						local hasMetadata = result2[1] and json.decode(result2[1].metadata) or {}
 						if next(hasMetadata) then
@@ -2094,6 +2197,7 @@ function InventoryService.addItemsToCustomInventory(id, items, charid, identifie
 							updateItemInCustomInventory(id, identifier, itemCraftedId, value.amount, itemMetadata, value, item, charid, isExpired, value.name)
 						end
 					else
+						local newTable = {}
 						for _, v in ipairs(resulItems) do
 							local result2 = DBService.queryAwait("SELECT metadata FROM items_crafted WHERE id =@id", { id = v.item_crafted_id })
 							local metadata = json.decode(result2[1].metadata)
@@ -2108,7 +2212,7 @@ function InventoryService.addItemsToCustomInventory(id, items, charid, identifie
 								updateItem(itemcraftedid, value, item, charid, isExpired, id, identifier)
 							end, id)
 						else
-							local itemCraftedId = result1[1].item_crafted_id
+							local itemCraftedId = newTable[1].item_crafted_id
 							updateItemInCustomInventory(id, identifier, itemCraftedId, value.amount, itemMetadata, value, item, charid, isExpired, value.name)
 						end
 					end
@@ -2209,7 +2313,6 @@ function InventoryService.removeItemFromCustomInventory(invId, item_name, amount
 	end
 	return true
 end
-
 
 function InventoryService.removeWeaponFromCustomInventory(invId, weapon_name)
 	local result = DBService.queryAwait("SELECT id FROM loadout WHERE curr_inv = @invId AND name = @name", { invId = invId, name = weapon_name })
